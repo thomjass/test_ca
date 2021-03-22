@@ -79,7 +79,7 @@ def main():
     df_ts = spark.createDataFrame(df_pd).cache()
 
     param = [
-        {'k': i, 'coeff': j} for i, j in itertools.product(range(1, 3), range(1, 3)) if j <= i
+        {'k': i, 'coeff': j} for i, j in itertools.product(range(1, 9), range(1, 9)) if j <= i
     ]
     res_spark = ar_coefficient_spark(spark, df_ts, param)
     res_attendu = ar_coefficient(df_pd.value, param)
