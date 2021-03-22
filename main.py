@@ -1,9 +1,52 @@
-from ar_coefficient_module import ar_coefficient_spark
 import numpy as np
 import pandas as pd
+from numpy.linalg import LinAlgError
 from pyspark.sql import SparkSession
 from datetime import datetime
 import itertools
+from pyspark.sql.functions import pandas_udf, PandasUDFType
+import pyspark.sql.functions as F
+from statsmodels.tsa.ar_model import AR
+from pyspark.sql.types import *
+
+schema = StructType([
+    StructField("k", IntegerType()),
+    StructField("coeff", IntegerType()),
+    StructField("value_ar", DoubleType()),
+])
+
+def computeARk_generator(dict_params):
+    @pandas_udf(schema, PandasUDFType.GROUPED_MAP)
+    def computeARk(pdf):
+        # order od pdf is not guaranteed by the groupby
+        pdf_ordered = pdf.sort_values('time')
+        k = pdf.iloc[0]['k']
+        try:
+            calculated_AR = AR(pdf_ordered['value'].to_list())
+            calculated_ar_params = calculated_AR.fit(maxlag=k, solver="mle").params
+        except (LinAlgError, ValueError):
+            calculated_ar_params = [np.NaN] * k
+        p_to_get = dict_params[k]
+        dict_res = {'k': [], 'coeff': [], 'value_ar': []}
+        for p in p_to_get:
+            dict_res['k'].append(k)
+            dict_res['coeff'].append(p)
+            try:
+                dict_res['value_ar'].append(calculated_ar_params[p])
+            except IndexError:
+                dict_res['value_ar'].append(0)
+        print(dict_res)
+        return pd.DataFrame(dict_res)
+    return computeARk
+
+
+def ar_coefficient_spark(spark, df, param):
+    df_param = pd.DataFrame(param)
+    dict_params = df_param.groupby('k')['coeff'].apply(list).to_dict()
+    df_k = spark.createDataFrame(df_param[['k']].drop_duplicates())
+    df_ts_k = df.crossJoin(F.broadcast(df_k))
+    df_value_ar = df_ts_k.groupBy('k').apply(computeARk_generator(dict_params))
+    return df_value_ar.rdd.map(lambda x : ("coeff_{}__k_{}".format(x.coeff, x.k), x.value_ar)).collect()
 
 
 def generate_time_series(n_steps):
@@ -19,21 +62,19 @@ def generate_time_series(n_steps):
 
 def main():
     spark = SparkSession.builder.appName('testCA').getOrCreate()
-    spark.conf.set("spark.sql.execution.arrow.pyspark.enabled", "true")
+    #spark.conf.set("spark.sql.execution.arrow.pyspark.enabled", "true")
+    spark.conf.set("spark.sql.shuffle.partitions", 9)
 
-    n_steps = 50
+    n_steps = 100
     df_pd = generate_time_series(n_steps)
 
     df_ts = spark.createDataFrame(df_pd).cache()
 
     param = [
-        {'k': i, 'coeff': j} for i, j in itertools.product(range(1, 10), range(1, 10)) if j <= i
+        {'k': i, 'coeff': j} for i, j in itertools.product(range(1, 3), range(1, 3)) if j <= i
     ]
 
-    number_of_cores = spark.sparkContext.defaultParallelism
-    spark.conf.set("spark.sql.shuffle.partitions", 9)
-
-    print(ar_coefficient_spark.ar_coefficient_spark(spark, df_ts, param))
+    print(ar_coefficient_spark(spark, df_ts, param))
 
 
 if __name__ == "__main__":
